@@ -1,0 +1,48 @@
+# Keeps Visor's F1 data fresh. Lives in the public data repository (see tools/f1db/README.md),
+# next to a copy of build_f1db.py, and needs no secrets: it reads F1DB, builds, and commits.
+#
+# Every 15 minutes it asks for F1DB's newest commit on main and rebuilds only when it changed.
+# F1DB's main gains each session's results about half a day after it runs (practice and
+# qualifying on the Saturday or Sunday morning, the race the morning after), ahead of its tagged
+# releases. A build that fails its checks isn't published: the app keeps the last good one.
+name: F1 data
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency: f1-data
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: F1DB's newest commit
+        id: src
+        run: echo "sha=$(git ls-remote https://github.com/f1db/f1db refs/heads/main | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Already built?
+        id: seen
+        run: |
+          if [ -f f1/index.json ] && grep -q '"commit":"${{ steps.src.outputs.sha }}"' f1/index.json; then
+            echo "built=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and publish
+        if: steps.seen.outputs.built != '1'
+        run: |
+          git clone --quiet --depth 1 --filter=blob:none --sparse https://github.com/f1db/f1db.git /tmp/f1db
+          git -C /tmp/f1db sparse-checkout set src/data
+          pip install --quiet pyyaml
+          python3 build_f1db.py --src /tmp/f1db/src/data --out /tmp/f1 --commit "${{ steps.src.outputs.sha }}"
+          rm -rf f1 && cp -r /tmp/f1 f1
+          git config user.name "visor-f1-data"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A f1
+          git commit --quiet -m "F1DB ${{ steps.src.outputs.sha }}" && git push --quiet || echo "Nothing changed"
